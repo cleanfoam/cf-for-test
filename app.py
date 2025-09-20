@@ -1,196 +1,226 @@
 import math
 import uuid
 from datetime import date
-
 import pandas as pd
 import streamlit as st
 
 # -----------------------------
-# Helpers
+# Configuration
 # -----------------------------
-def clean_number(n: float):
-    """Render integers without .0 (e.g., 20.0 -> 20)."""
-    try:
-        return int(n) if float(n).is_integer() else n
-    except Exception:
-        return n
+st.set_page_config(
+    page_title="CleanFoam Pro",
+    page_icon="✨",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+st.title("✨ CleanFoam Pro")
 
-def compute_fee(total_value: float, withdrawn: float, due_custom: float | None):
-    """Business fee rules."""
-    if due_custom is not None:
-        return due_custom
+# -----------------------------
+# Session State Management
+# -----------------------------
+def initialize_session_state():
+    """Initialize session state variables if they don't exist."""
+    if "workers" not in st.session_state:
+        st.session_state.workers: list[dict] = []
+    if "report_date" not in st.session_state:
+        st.session_state.report_date = date.today()
+    if "theme" not in st.session_state:
+        st.session_state.theme = "Light"
 
-    half_value = total_value / 2
-    eps = 1e-6
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def clean_number(n):
+    """Render integers without .0 and handle non-numeric types gracefully."""
+    if isinstance(n, (int, float)):
+        return int(n) if float(n).is_integer() else f"{n:.2f}"
+    return n
 
-    rules_half = {
-        40.0: 20.0,
-        45.0: 20.0,
-        50.0: 25.0,
-        52.5: 27.5,
-        55.0: 25.0,
+def compute_fee(total_value: float, custom_due: float | None) -> float:
+    """
+    Calculate the fee based on business rules.
+    Rules are now stored in a dictionary for easier maintenance.
+    """
+    if custom_due is not None and custom_due > 0:
+        return custom_due
+
+    # Rule mapping: (total_value_check, fee)
+    rules = {
+        80.0: 20.0,
+        90.0: 20.0,
+        95.0: 22.5,
+        100.0: 25.0,
+        105.0: 27.5,
+        110.0: 25.0,
     }
+    
+    # Check for exact matches in rules
+    fee = rules.get(total_value)
+    if fee is not None:
+        return fee
 
-    for hv, fee in rules_half.items():
-        if math.isclose(half_value, hv, abs_tol=eps):
-            return fee
-
-    if math.isclose(total_value, 95.0, abs_tol=eps):
-        return 22.5
-
+    # Fallback rules
     if int(total_value) % 10 == 5:
         return 32.5
 
     return 30.0
 
-def as_row(worker_id, name, total, due, withdrawn, remaining, note=""):
-    # Keep ID internally; never display it
+def create_worker_row(worker_id, name, total, due, withdrawn, remaining, note=""):
+    """Factory for creating a worker data dictionary."""
     return {
         "ID": worker_id,
         "Worker": name,
-        "Total": clean_number(total),
-        "Due": clean_number(due),
-        "Withdrawn": clean_number(withdrawn),
-        "Remaining": clean_number(remaining),
+        "Total": total,
+        "Due": due,
+        "Withdrawn": withdrawn,
+        "Remaining": remaining,
         "Note": note,
     }
 
 # -----------------------------
-# App Config
+# UI: Sidebar Inputs
 # -----------------------------
-st.set_page_config(page_title="CleanFoam", page_icon="✅", layout="wide")
-st.title("CleanFoam")
+def show_sidebar_inputs():
+    """Render all input widgets in the sidebar."""
+    with st.sidebar:
+        st.header("📝 Add New Entry")
+        
+        name = st.text_input("Worker Name", help="Enter the name of the worker.")
+        total_value = st.number_input("Total Value", min_value=0.0, step=0.5, format="%.2f")
+        withdrawn_val = st.number_input("Withdrawn Value", min_value=0.0, step=0.5, format="%.2f")
+        
+        entry_type = st.radio("Entry Type", ("Standard", "CF"), horizontal=True, index=0)
+        
+        with st.expander("Advanced Options"):
+            due_custom_val = st.number_input("Custom Due (Optional)", min_value=0.0, step=0.5, format="%.2f")
+            note_text = st.text_input("Note (Optional)", help="Add any relevant notes.")
+
+        add_clicked = st.button("➕ Add Worker", type="primary", use_container_width=True)
+
+        st.divider()
+        st.header("⚙️ Settings")
+        st.session_state.report_date = st.date_input("Report Date", value=st.session_state.report_date)
+
+        if st.button("🗑️ Reset All Workers", use_container_width=True):
+            if st.session_state.workers:
+                st.session_state.workers = []
+                st.success("All workers have been cleared.")
+                st.rerun()
+            else:
+                st.info("The list is already empty.")
+
+    return name, total_value, withdrawn_val, entry_type, due_custom_val, note_text, add_clicked
 
 # -----------------------------
-# Session State
+# UI: Main Page Display
 # -----------------------------
-if "workers" not in st.session_state:
-    st.session_state.workers: list[dict] = []
+def show_main_content():
+    """Render the main page content (table, metrics, actions)."""
+    if not st.session_state.workers:
+        st.info("No workers added yet. Use the sidebar to add a new entry.")
+        return
 
-if "report_date" not in st.session_state:
-    st.session_state.report_date = date.today()
-
-# -----------------------------
-# MAIN PAGE INPUTS (no sidebar, visible immediately)
-# -----------------------------
-st.subheader("Inputs")
-
-row1_col1, row1_col2, row1_col3, row1_col4 = st.columns([1, 1, 1, 1])
-with row1_col1:
-    st.session_state.report_date = st.date_input("Date", value=st.session_state.report_date)
-with row1_col2:
-    name = st.text_input("Name")
-with row1_col3:
-    entry_type = st.radio("Entry Type", ("Standard", "CF"), horizontal=True)
-with row1_col4:
-    note_text = st.text_input("Note (optional)")
-
-row2_col1, row2_col2, row2_col3, row2_col4 = st.columns([1, 1, 1, 1])
-with row2_col1:
-    total_value = st.number_input("Enter the total", min_value=0.0, step=0.5, format="%.2f")
-with row2_col2:
-    withdrawn_val = st.number_input("Enter the withdrawn", min_value=0.0, step=0.5, format="%.2f")
-with row2_col3:
-    due_custom_val = st.number_input("Enter custom Due (optional)", min_value=0.0, step=0.5, format="%.2f")
-    due_custom = None if due_custom_val == 0.0 else due_custom_val
-with row2_col4:
-    add_clicked = st.button("Add", type="primary", use_container_width=True)
-
-row3_col1, _ = st.columns([1, 3])
-with row3_col1:
-    reset_clicked = st.button("Reset Workers", use_container_width=True)
-
-# -----------------------------
-# Add Logic
-# -----------------------------
-if add_clicked:
-    if not name:
-        st.error("Please enter a name.")
-    elif total_value <= 0:
-        st.error("Total must be greater than 0.")
-    else:
-        wid = uuid.uuid4().hex[:8]
-        if entry_type == "CF":
-            st.session_state.workers.append(
-                as_row(wid, name, total_value, "", "", "", note_text)
-            )
-        else:
-            fee = compute_fee(total_value, withdrawn_val, due_custom)
-            half_value = total_value / 2
-            after_withdraw = half_value - withdrawn_val
-            remaining = after_withdraw - fee
-            st.session_state.workers.append(
-                as_row(wid, name, total_value, fee, withdrawn_val, remaining, note_text)
-            )
-        st.success(f"Added {name}")
-
-if reset_clicked:
-    st.session_state.workers = []
-    st.info("All workers cleared.")
-
-# -----------------------------
-# Table & Metrics
-# -----------------------------
-if st.session_state.workers:
     df_internal = pd.DataFrame(st.session_state.workers)
+    
+    # Ensure numeric columns are treated as numbers, coercing errors
+    for col in ["Total", "Due", "Withdrawn", "Remaining"]:
+        df_internal[col] = pd.to_numeric(df_internal[col], errors='coerce').fillna(0)
 
-    # Display dataframe WITHOUT the internal ID
-    df_display = df_internal[["Worker", "Total", "Due", "Withdrawn", "Remaining", "Note"]]
-
-    st.subheader("Workers Table")
+    # Create a display version with clean numbers and without the ID
+    df_display = df_internal.copy()
+    for col in ["Total", "Due", "Withdrawn", "Remaining"]:
+        df_display[col] = df_display[col].apply(clean_number)
+    
+    st.subheader("Workers Overview")
     st.caption(f"Date: {st.session_state.report_date.strftime('%Y-%m-%d')}")
-
-    # Style: make Note column bold
-    def highlight_note(val):
-        return "font-weight: bold" if val else ""
-
+    
     st.dataframe(
-        df_display.style.applymap(highlight_note, subset=["Note"]),
+        df_display[["Worker", "Total", "Due", "Withdrawn", "Remaining", "Note"]],
         use_container_width=True,
+        hide_index=True,
     )
 
-    # Totals — CF rows are ALWAYS included in totals
-    numeric_total = df_internal["Total"].apply(lambda x: x if isinstance(x, (int, float)) else 0).sum()
-    numeric_withdrawn = df_internal["Withdrawn"].apply(lambda x: x if isinstance(x, (int, float)) else 0).sum()
-    numeric_remaining = df_internal["Remaining"].apply(lambda x: x if isinstance(x, (int, float)) else 0).sum()
+    # --- Metrics ---
+    st.subheader("Financial Summary")
+    total_sum = df_internal["Total"].sum()
+    withdrawn_sum = df_internal["Withdrawn"].sum()
+    remaining_sum = df_internal["Remaining"].sum()
+    
+    for_workers = withdrawn_sum + remaining_sum
+    for_cleanfoam = total_sum - for_workers
 
-    for_workers = numeric_withdrawn + numeric_remaining
-    total_for_cleanfoam = numeric_total - for_workers
-    display_total = numeric_total
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💰 Total Revenue", f"{total_sum:,.2f}")
+    col2.metric("👥 For Workers", f"{for_workers:,.2f}")
+    col3.metric("🏢 For CleanFoam", f"{for_cleanfoam:,.2f}")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total", clean_number(display_total))
-    c2.metric("For workers", clean_number(for_workers))
-    c3.metric("For CleanFoam", clean_number(total_for_cleanfoam))
-
-    # Actions (no ID visible in UI)
-    with st.expander("Actions"):
-        st.markdown("### Delete a worker")
-        # Build user-friendly labels without exposing ID; handle duplicates with # numbering
-        labels = []
-        id_map = {}
+    # --- Actions ---
+    with st.expander("⚠️ Actions"):
+        # Delete worker
+        st.markdown("#### Delete a Worker")
+        
+        # Create unique labels for workers with the same name
         name_counts = {}
-        for _, r in df_internal.iterrows():
-            n = r["Worker"]
-            name_counts[n] = name_counts.get(n, 0) + 1
-            label = f"{n} #{name_counts[n]}" if name_counts[n] > 1 else n
+        id_map = {}
+        labels = []
+        for _, row in df_internal.iterrows():
+            name = row["Worker"]
+            count = name_counts.get(name, 0) + 1
+            name_counts[name] = count
+            label = f"{name} (Total: {row['Total']})" + (f" #{count}" if count > 1 else "")
             labels.append(label)
-            id_map[label] = r["ID"]
+            id_map[label] = row["ID"]
 
-        if labels:
-            selected_label = st.selectbox("Select worker to delete", labels)
-            if st.button("Delete", type="secondary"):
-                sel_id = id_map[selected_label]
-                st.session_state.workers = [w for w in st.session_state.workers if w["ID"] != sel_id]
-                st.success(f"Deleted {selected_label}")
+        selected_label = st.selectbox("Select worker to delete", options=labels, index=None, placeholder="Choose a worker...")
+        
+        if st.button("❌ Delete Selected Worker", type="secondary", disabled=(not selected_label)):
+            worker_id_to_delete = id_map[selected_label]
+            st.session_state.workers = [w for w in st.session_state.workers if w["ID"] != worker_id_to_delete]
+            st.success(f"Deleted: {selected_label}")
+            st.rerun()
 
-        # Download CSV without ID
-        csv = df_display.to_csv(index=False).encode("utf-8")
+        # Download CSV
+        st.markdown("#### Download Report")
+        csv_data = df_display[["Worker", "Total", "Due", "Withdrawn", "Remaining", "Note"]].to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"cleanfoam_{st.session_state.report_date.strftime('%Y%m%d')}.csv",
+            label="📥 Download as CSV",
+            data=csv_data,
+            file_name=f"cleanfoam_report_{st.session_state.report_date.strftime('%Y%m%d')}.csv",
             mime="text/csv",
+            use_container_width=True,
         )
-else:
-    st.info("No workers added yet.")
+
+# -----------------------------
+# Main App Logic
+# -----------------------------
+def main():
+    initialize_session_state()
+    
+    name, total_value, withdrawn_val, entry_type, due_custom_val, note_text, add_clicked = show_sidebar_inputs()
+
+    if add_clicked:
+        if not name:
+            st.sidebar.error("Worker name is required.")
+        elif total_value <= 0:
+            st.sidebar.error("Total value must be greater than 0.")
+        else:
+            wid = uuid.uuid4().hex[:8]
+            due_custom = None if due_custom_val == 0.0 else due_custom_val
+            
+            if entry_type == "CF":
+                new_worker = create_worker_row(wid, name, total_value, "", "", "", note_text)
+            else:
+                fee = compute_fee(total_value, due_custom)
+                half_value = total_value / 2
+                after_withdraw = half_value - withdrawn_val
+                remaining = after_withdraw - fee
+                new_worker = create_worker_row(wid, name, total_value, fee, withdrawn_val, remaining, note_text)
+            
+            st.session_state.workers.append(new_worker)
+            st.sidebar.success(f"Added {name} successfully!")
+            st.rerun()
+
+    show_main_content()
+
+if __name__ == "__main__":
+    main()
